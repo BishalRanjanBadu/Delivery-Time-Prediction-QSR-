@@ -14,13 +14,14 @@ Built a machine learning model to predict food delivery time using real-world lo
   * Traffic-adjusted distance
   * Peak-hour indicator
   * Order preparation time
+
 * Compared models:
 
   * Linear Regression
   * Random Forest
   * XGBoost (final)
 * Tuned using RandomizedSearchCV
-* Validated with 5-fold Cross Validation
+* Validated with 10-fold Cross Validation
 
 ---
 
