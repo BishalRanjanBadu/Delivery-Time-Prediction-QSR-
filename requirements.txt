@@ -1,0 +1,35 @@
+"""
+Model training and evaluation for QSR delivery-time prediction.
+
+Fix applied here (Bug #2 from the code review): the original notebook's
+actual-vs-predicted plot, residual plot, and saved predictions.csv all
+used the PRE-TUNING XGBoost model's predictions, while the headline
+"final" metrics reported in the README came from the hyperparameter-
+tuned model. Every function here that produces plots/predictions takes
+an explicit model + predictions argument so there's no ambiguity about
+which model's output is being used -- the training script wires the
+TUNED model into all of them.
+"""
+import numpy as np
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+
+def _safe_mape(y_true, y_pred):
+    return np.mean(np.abs((y_true - y_pred) / np.maximum(y_true, 1))) * 100
+
+
+def evaluate(y_true, y_pred) -> dict:
+    return {
+        'MAE': mean_absolute_error(y_true, y_pred),
+        'RMSE': float(np.sqrt(mean_squared_error(y_true, y_pred))),
+        'R2': r2_score(y_true, y_pred),
+        'MAPE': _safe_mape(y_true, y_pred),
+    }
+
+
+def print_metrics(label: str, metrics: dict):
+    print(f"-- {label} --")
+    print(f"  MAE  : {metrics['MAE']:.4f}")
+    print(f"  RMSE : {metrics['RMSE']:.4f}")
+    print(f"  R2   : {metrics['R2']:.4f}")
+    print(f"  MAPE : {metrics['MAPE']:.2f}%")
