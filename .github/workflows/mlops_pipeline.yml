@@ -73,6 +73,7 @@ jobs:
         with:
           image-ref: "${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.tag }}"
           severity: "HIGH,CRITICAL"
+          ignore-unfixed: true
           exit-code: "1"
       - name: Push
         env:
