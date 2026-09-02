@@ -31,7 +31,13 @@ DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "zomato_raw.cs
 
 @pytest.fixture(scope="module")
 def raw():
-    return pd.read_csv(DATA_PATH)
+    """Load raw data: prefer a local copy (fast, offline); otherwise fall back to
+    S3 via the same s3_io the app uses. CI runners have no local data/ folder."""
+    if os.path.exists(DATA_PATH):
+        return pd.read_csv(DATA_PATH)
+    import s3_io  # noqa: E402
+    raw_key = os.environ.get("RAW_KEY", "raw/zomato_raw.csv")
+    return s3_io.read_csv_s3(raw_key)
 
 
 @pytest.fixture(scope="module")
