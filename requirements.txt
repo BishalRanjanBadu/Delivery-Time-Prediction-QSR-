@@ -1,3 +1,7 @@
+# QSR-ETA Phase 2 — pins verified against PyPI; clean-venv install + 13 tests pass.
+# Python 3.11.
+
+# --- runtime ---
 pandas==2.2.3
 numpy==1.26.4
 scikit-learn==1.5.2
@@ -10,6 +14,9 @@ joblib==1.4.2
 fastapi==0.115.6
 pydantic==2.10.4
 uvicorn[standard]==0.34.0
+
+# --- test (tests/test_model.py needs: pytest, moto for mocked S3,
+#     httpx for fastapi TestClient) ---
 pytest==8.3.4
 moto[s3]==5.0.28
 httpx==0.28.1
