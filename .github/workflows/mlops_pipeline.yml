@@ -1,0 +1,117 @@
+name: mlops_pipeline
+# Trigger 1 (code): git push → test → build+scan+push(ECR) → deploy(EKS).
+# develop → UAT namespace (straight rollout); main → prod (canary rollout).
+#
+# AUTH: static IAM keys stored as GitHub Actions SECRETS (AWS_ACCESS_KEY_ID,
+# AWS_SECRET_ACCESS_KEY). Non-sensitive config comes from GitHub VARIABLES.
+# The keys never live in the repo — only in encrypted GitHub secrets.
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+
+env:
+  ECR_REPOSITORY: qsr-eta-prediction
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  MODEL_MAPE_GATE: "0.18"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Tests (leakage regression + call-order guard + business invariants + MAPE gate)
+        env: { MODEL_MAPE_GATE: "0.18" }
+        run: pytest tests/ -v
+
+  build:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure AWS (static keys from GitHub secrets)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - id: meta
+        run: echo "tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+      - name: Build
+        env: { REGISTRY: "${{ steps.ecr.outputs.registry }}", TAG: "${{ steps.meta.outputs.tag }}" }
+        run: docker build -t "$REGISTRY/$ECR_REPOSITORY:$TAG" -t "$REGISTRY/$ECR_REPOSITORY:latest" .
+      - name: Trivy scan (fail on HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.tag }}"
+          severity: "HIGH,CRITICAL"
+          exit-code: "1"
+      - name: Push
+        env: { REGISTRY: "${{ steps.ecr.outputs.registry }}", TAG: "${{ steps.meta.outputs.tag }}" }
+        run: |
+          docker push "$REGISTRY/$ECR_REPOSITORY:$TAG"
+          docker push "$REGISTRY/$ECR_REPOSITORY:latest"
+
+  deploy-uat:
+    needs: build
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      - run: aws eks update-kubeconfig --name ${{ vars.EKS_CLUSTER }} --region ${{ env.AWS_REGION }}
+      - name: Deploy UAT
+        env:
+          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+          S3_BUCKET: ${{ vars.S3_BUCKET }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+        run: |
+          envsubst < k8s/config.yml         | kubectl apply -f -
+          envsubst < k8s/deployment-uat.yml | kubectl apply -f -
+          kubectl -n uat rollout status deploy/qsr-eta-api --timeout=180s
+
+  deploy-prod:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      - run: aws eks update-kubeconfig --name ${{ vars.EKS_CLUSTER }} --region ${{ env.AWS_REGION }}
+      - name: Apply manifests (canary starts at 0 replicas)
+        env:
+          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+          CANARY_TAG: ${{ needs.build.outputs.image_tag }}
+          STABLE_TAG: ${{ vars.CURRENT_STABLE_TAG }}
+          S3_BUCKET: ${{ vars.S3_BUCKET }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+        run: |
+          envsubst < k8s/config.yml     | kubectl apply -f -
+          envsubst < k8s/deployment.yml | kubectl apply -f -
+      - name: Canary rollout (bake + auto-rollback)
+        env:
+          CANARY_TAG: ${{ needs.build.outputs.image_tag }}
+          STABLE_TAG: ${{ vars.CURRENT_STABLE_TAG }}
+          PROM_URL: ${{ vars.PROM_URL }}
+          BAKE_SECONDS: "300"
+        run: bash k8s/canary_rollout.sh

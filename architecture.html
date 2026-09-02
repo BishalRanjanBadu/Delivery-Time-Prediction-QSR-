@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Zomato Delivery-Time — Phase 2 Deployment Architecture</title>
+<style>
+  body { font-family: Arial, sans-serif; background: #f0f4f8; margin: 0; padding: 20px; color:#222; }
+  h1 { text-align:center; color:#7b1113; font-size:1.6rem; margin-bottom:2px; }
+  .sub { text-align:center; color:#555; font-size:.9rem; margin-bottom:24px; }
+  .wrap { background:#fff; border-radius:12px; padding:26px; box-shadow:0 2px 10px rgba(0,0,0,.08); max-width:960px; margin:0 auto; }
+  .box { border:2px solid #7b1113; border-radius:8px; padding:10px 16px; margin:0 auto; }
+  .box-title { font-weight:bold; font-size:.9rem; color:#fff; background:#7b1113; margin:-10px -16px 8px -16px; padding:7px 16px; border-radius:6px 6px 0 0; }
+  .box-body { font-size:.82rem; line-height:1.6; }
+  .file { font-family:monospace; color:#7b1113; font-weight:bold; }
+  .desc { color:#555; }
+  .arrow { text-align:center; font-size:1.4rem; color:#7b1113; margin:6px 0; }
+  .lbl { font-size:.76rem; color:#777; display:block; }
+  .row { display:flex; gap:16px; justify-content:center; align-items:flex-start; }
+  .w960 { width:100%; } .w300 { width:300px; }
+  .green { border-color:#2e7d32; } .green .box-title { background:#2e7d32; }
+  .orange { border-color:#e65100; } .orange .box-title { background:#e65100; }
+  .purple { border-color:#6a1b9a; } .purple .box-title { background:#6a1b9a; }
+  .teal { border-color:#00695c; } .teal .box-title { background:#00695c; }
+  .navy { border-color:#283593; } .navy .box-title { background:#283593; }
+  .section { font-size:.72rem; font-weight:bold; color:#888; letter-spacing:1px; text-transform:uppercase; margin:8px 0 3px; border-top:1px solid #eee; padding-top:6px; }
+  .section:first-child { border-top:none; margin-top:0; }
+  .pod { border:1px dashed #00695c; border-radius:6px; padding:6px 12px; font-size:.78rem; color:#00695c; text-align:center; }
+  .note { font-size:.72rem; color:#b71c1c; margin-top:4px; }
+</style>
+</head>
+<body>
+<h1>🛵 Zomato Delivery-Time — Phase 2 Deployment</h1>
+<div class="sub">Code-push automation loop · leakage-safe preprocessing · canary rollout · (monitoring &amp; retraining = Phase 3)</div>
+
+<div class="wrap">
+
+  <div class="box purple w960">
+    <div class="box-title">🐙 GitHub — zomato-delivery-mlops</div>
+    <div class="box-body">
+      <span class="file">src/preprocess.py</span> <span class="file">train.py</span>
+      <span class="file">predict.py</span> <span class="file">api.py</span> <span class="file">app.py</span> ·
+      <span class="file">tests/test_model.py</span> · <span class="file">k8s/</span> · <span class="file">Dockerfile</span>
+    </div>
+  </div>
+
+  <div class="arrow">↓ <span class="lbl">git push (develop / main)</span></div>
+
+  <div class="box purple w960">
+    <div class="box-title">⚡ GitHub Actions — mlops_pipeline.yml</div>
+    <div class="box-body">
+      <b>Job 1 — TEST</b> pytest: technical + business-invariant + <b>leakage regression</b> + call-order guard + MAPE gate → must pass<br>
+      <b>Job 2 — BUILD</b> docker build → <b>Trivy scan</b> (fail on HIGH/CRITICAL) → push ECR (git-SHA + latest)<br>
+      <b>Job 3 — DEPLOY</b> develop → UAT (rolling) · main → prod (<b>canary</b>)
+      <div class="note">AWS auth via OIDC — no static keys in the repo.</div>
+    </div>
+  </div>
+
+  <div class="arrow">↓ <span class="lbl">image + manifests</span></div>
+
+  <div class="row">
+    <div class="box orange w300">
+      <div class="box-title">☁️ AWS S3 — s3://&lt;bucket&gt;/</div>
+      <div class="box-body">
+        <div class="section">models/</div>
+        <span class="file">best_model.pkl</span> <span class="desc">promoted model</span><br>
+        <span class="file">preprocessor.pkl</span> <span class="desc">fitted on train only</span><br>
+        <span class="file">feature_names.pkl</span> <span class="desc">exact train order</span><br>
+        <span class="file">model_metrics.json</span> <span class="desc">MAPE/MAE/R²/date</span>
+        <div class="section">raw/</div>
+        <span class="file">zomato_raw.csv</span>
+      </div>
+    </div>
+
+    <div class="box green w300">
+      <div class="box-title">🔮 src/predict.py + api.py</div>
+      <div class="box-body">
+        Loads model + preprocessor + metrics once (cached)<br>
+        <b>transform-only</b> — no fitting at serve time<br>
+        Aligns to <span class="file">feature_names</span> (fill 0 / drop extra)<br><br>
+        Returns: predicted_time_min · <b>eta_band</b> ·
+        delivery_window · SHAP<br><br>
+        <span class="file">GET /health</span> <span class="file">GET /model_info</span> <span class="file">POST /predict</span>
+      </div>
+    </div>
+
+    <div class="box navy w300">
+      <div class="box-title">🏋️ src/train.py</div>
+      <div class="box-body">
+        split_raw() → <b>fit on train only</b> → transform test<br>
+        RandomizedSearchCV, 5-fold CV<br>
+        MAPE gate (&lt;0.18) + compare vs incumbent<br>
+        Promote to S3 <b>only if better &amp; gate-passing</b>
+        <div class="note">Fit-before-split (the reference's leak) is blocked by tests.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow">↓ <span class="lbl">one image serves both ports</span></div>
+
+  <div class="box teal w960">
+    <div class="box-title">🐳 Docker → 📦 ECR → ☸️ EKS (LoadBalancer)</div>
+    <div class="box-body" style="text-align:center;">
+      FastAPI :8000 &nbsp;+&nbsp; Streamlit :8501 (one image, ROLE-switchable)
+      <div class="row" style="margin-top:8px;">
+        <div class="pod">stable ×9<br>~90% traffic</div>
+        <div class="pod">canary ×1→5→10<br>10%→50%→100%</div>
+      </div>
+      <div style="margin-top:6px;">canary_rollout.sh bakes each step (error rate / latency / <b>prediction distribution</b>) → ramp or <b>auto-rollback</b></div>
+    </div>
+  </div>
+
+  <div class="sub" style="margin-top:18px;">Phase 3 (separate sign-off): Lambda+EventBridge drift · Evidently · SNS · SageMaker retraining · MLflow · CloudWatch SLA · model card · DR.</div>
+</div>
+</body>
+</html>

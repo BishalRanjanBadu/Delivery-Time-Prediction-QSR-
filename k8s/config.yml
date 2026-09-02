@@ -1,0 +1,28 @@
+# Non-secret config only. Namespaces + ConfigMaps.
+# The IRSA-annotated ServiceAccount (qsr-eta-api) is created per-namespace by
+# `eksctl create iamserviceaccount` (see runbook STEP 7) so pods get temporary
+# AWS creds for S3 with no long-lived keys. ${...} filled by envsubst in CI.
+---
+apiVersion: v1
+kind: Namespace
+metadata: { name: prod }
+---
+apiVersion: v1
+kind: Namespace
+metadata: { name: uat }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: qsr-eta-config, namespace: prod }
+data:
+  s3_bucket: "${S3_BUCKET}"
+  aws_region: "${AWS_REGION}"
+  mape_gate: "0.18"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: qsr-eta-config, namespace: uat }
+data:
+  s3_bucket: "${S3_BUCKET}"
+  aws_region: "${AWS_REGION}"
+  mape_gate: "0.18"

@@ -1,0 +1,56 @@
+# UAT deployment (namespace: uat). Triggered by the `develop` branch.
+# Single track, straight rollout — canary is a prod-only safety net. UAT is where
+# the image is smoke-tested end-to-end before it is ever promoted to prod.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: uat
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qsr-eta-api
+  namespace: uat
+  labels: { app: qsr-eta-api }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: qsr-eta-api }
+  template:
+    metadata:
+      labels: { app: qsr-eta-api }
+    spec:
+      serviceAccountName: qsr-eta-api
+      containers:
+        - name: api
+          image: ${ECR_REGISTRY}/qsr-eta-prediction:${IMAGE_TAG}
+          ports: [{ containerPort: 8000 }, { containerPort: 8501 }]
+          env:
+            - { name: MODEL_VERSION, value: "uat-${IMAGE_TAG}" }
+            - { name: S3_BUCKET, valueFrom: { configMapKeyRef: { name: qsr-eta-config, key: s3_bucket } } }
+            - { name: AWS_REGION, valueFrom: { configMapKeyRef: { name: qsr-eta-config, key: aws_region } } }
+            - { name: MODEL_MAPE_GATE, valueFrom: { configMapKeyRef: { name: qsr-eta-config, key: mape_gate } } }
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          resources:
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits: { cpu: "1", memory: "1Gi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qsr-eta-api
+  namespace: uat
+spec:
+  selector: { app: qsr-eta-api }
+  ports:
+    - { name: api, port: 80, targetPort: 8000 }
+    - { name: ui,  port: 8501, targetPort: 8501 }
+  type: LoadBalancer
