@@ -1,30 +1,31 @@
 """
-Inference for the Zomato delivery-time model (Phase 2).
+Inference for the QSR delivery-time model (Phase 2).
 
 TRANSFORM-ONLY: loads the fitted preprocessor + model from S3 and applies the
 statistics learned on the training split. Nothing is fit here, so inference
-cannot introduce leakage or train/serve skew — it is the same `.transform()` path
-used for test and (in Phase 3) retraining.
+cannot introduce leakage or train/serve skew.
 
-Business layer (post-prediction mapping — derived from the model output, NOT fed
-back as a feature, so no leakage):
-  * eta_band   — Fast / Average / Slow bucket of the predicted minutes, for ops
-                 routing and customer messaging.
-  * delivery_window — predicted ± the model's held-out MAE, a calibrated range
-                 rather than a false point-precision.
-  * shap_explanation — top per-prediction feature contributions.
+Business layer (derived FROM the model output, never fed back as a feature):
+  * eta_band          — Fast / Average / Slow bucket, for ops routing
+  * delivery_window   — predicted +/- the model's held-out MAE
+  * shap_explanation  — top per-prediction contributions (ENABLE_SHAP=0 to skip)
+
+FALLBACK CONTRACT (was missing): if the model or preprocessor cannot produce a
+prediction, `predict_records` degrades to a documented rule-based estimate and
+marks the record `source="fallback"` instead of raising an undefined 5xx.
+Order: model -> rule-based default -> graceful error. The caller can key alerts
+off `source`.
 """
 from __future__ import annotations
 
 import json
 import logging
+import os
 from functools import lru_cache
 
-import numpy as np
 import pandas as pd
 
 import s3_io
-from preprocess import TARGET
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +33,14 @@ PREPROCESSOR_KEY = "models/preprocessor.pkl"
 MODEL_KEY = "models/best_model.pkl"
 METRICS_KEY = "models/model_metrics.json"
 
-# ETA bands (minutes). Post-prediction buckets for the business layer.
 ETA_BANDS = [(0, 20, "Fast"), (20, 34, "Average"), (34, float("inf"), "Slow")]
+
+# Rule-based fallback, calibrated from the Phase-1 training distribution.
+# Deliberately crude: it exists so a model outage degrades service instead of
+# failing it. Any use of it should page.
+FALLBACK_BASE_MIN = float(os.environ.get("FALLBACK_BASE_MIN", "20"))
+FALLBACK_MIN_PER_KM = float(os.environ.get("FALLBACK_MIN_PER_KM", "1.6"))
+FALLBACK_TRAFFIC_ADD = {"Low": 0.0, "Medium": 3.0, "High": 6.0, "Jam": 10.0}
 
 
 @lru_cache(maxsize=1)
@@ -94,25 +101,53 @@ def _shap_top(model, X_row: pd.DataFrame, k: int = 5) -> dict:
         return {}
 
 
-def predict_records(records: list[dict], with_explanation: bool = True) -> list[dict]:
-    """Predict for raw JSON records, returning the full business layer per record."""
-    pre, model, metrics = _load_artifacts()
-    df = pd.DataFrame(records)
-    enc = pre.transform(df)
-    X = enc[pre.feature_names_]
-    preds = model.predict(X)
-    mae = float(metrics.get("mae", 0.0))
+def _rule_based_minutes(rec: dict) -> float:
+    """Documented degraded-mode estimate. Used only when the model path fails."""
+    dist = rec.get("distance_km")
+    try:
+        dist = float(dist)
+    except (TypeError, ValueError):
+        dist = 5.0
+    traffic = FALLBACK_TRAFFIC_ADD.get(str(rec.get("Road_traffic_density", "")).strip(), 4.0)
+    festival = 8.0 if str(rec.get("Festival", "")).strip() == "Yes" else 0.0
+    return FALLBACK_BASE_MIN + FALLBACK_MIN_PER_KM * dist + traffic + festival
+
+
+def _package(minutes: float, mae: float, source: str) -> dict:
+    minutes = float(minutes)
+    return {
+        "predicted_time_min": round(minutes, 1),
+        "eta_band": _eta_band(minutes),
+        "delivery_window_min": [round(max(0.0, minutes - mae), 1), round(minutes + mae, 1)],
+        "source": source,
+    }
+
+
+def predict_records(records: list[dict], with_explanation: bool | None = None) -> list[dict]:
+    """Predict for raw JSON records, returning the full business layer per record.
+
+    Never raises for a model-side failure: falls back to the rule-based estimate
+    and tags the record so callers/alerts can see degraded mode.
+    """
+    if with_explanation is None:
+        # ENABLE_SHAP=0 lets memory-tight nodes (e.g. free-tier t3.small) skip SHAP
+        with_explanation = os.environ.get("ENABLE_SHAP", "1") != "0"
+
+    try:
+        pre, model, metrics = _load_artifacts()
+        df = pd.DataFrame(records)
+        enc = pre.transform(df)
+        X = enc[pre.feature_names_]
+        preds = model.predict(X)
+        # MAE defaults to a non-zero width so the window is never a false point.
+        mae = float(metrics.get("mae") or 4.0)
+    except Exception as e:  # noqa: BLE001
+        logger.error("MODEL PATH FAILED (%s) -> rule-based fallback", e)
+        return [_package(_rule_based_minutes(r), 6.0, "fallback") for r in records]
 
     out = []
     for i, minutes in enumerate(preds):
-        minutes = float(minutes)
-        lo = max(0.0, minutes - mae)
-        hi = minutes + mae
-        rec = {
-            "predicted_time_min": round(minutes, 1),
-            "eta_band": _eta_band(minutes),
-            "delivery_window_min": [round(lo, 1), round(hi, 1)],
-        }
+        rec = _package(minutes, mae, "model")
         if with_explanation:
             rec["shap_explanation"] = _shap_top(model, X.iloc[[i]])
         out.append(rec)

@@ -1,3 +1,8 @@
+# UAT deployment  [FIXED: removed the 8501 Service port — this image is
+# API-only, so nothing listened on it and the LB target was permanently
+# unhealthy. Added startupProbe; liveness moved to the cheap /live endpoint.]
+#
+# original header:
 # UAT deployment (namespace: uat). Triggered by the `develop` branch.
 # Single track, straight rollout — canary is a prod-only safety net. UAT is where
 # the image is smoke-tested end-to-end before it is ever promoted to prod.
@@ -25,23 +30,31 @@ spec:
       containers:
         - name: api
           image: ${ECR_REGISTRY}/qsr-eta-prediction:${IMAGE_TAG}
-          ports: [{ containerPort: 8000 }, { containerPort: 8501 }]
+          ports: [{ containerPort: 8000 }]
           env:
+            - { name: ROLE, value: "api" }
+            - { name: ENABLE_SHAP, value: "0" }   # SHAP import ~250MB RSS; off on small nodes
             - { name: MODEL_VERSION, value: "uat-${IMAGE_TAG}" }
             - { name: S3_BUCKET, valueFrom: { configMapKeyRef: { name: qsr-eta-config, key: s3_bucket } } }
             - { name: AWS_REGION, valueFrom: { configMapKeyRef: { name: qsr-eta-config, key: aws_region } } }
             - { name: MODEL_MAPE_GATE, valueFrom: { configMapKeyRef: { name: qsr-eta-config, key: mape_gate } } }
+          # startupProbe covers the cold S3 model load (can exceed 30s on a
+          # small node). liveness only starts after startup succeeds, so a slow
+          # first load no longer causes CrashLoopBackOff.
+          startupProbe:
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 10
+            failureThreshold: 18          # up to 180s to become ready
           readinessProbe:
             httpGet: { path: /health, port: 8000 }
-            initialDelaySeconds: 10
             periodSeconds: 10
           livenessProbe:
-            httpGet: { path: /health, port: 8000 }
-            initialDelaySeconds: 20
-            periodSeconds: 15
+            httpGet: { path: /live, port: 8000 }
+            periodSeconds: 20
+            failureThreshold: 3
           resources:
-            requests: { cpu: "250m", memory: "512Mi" }
-            limits: { cpu: "1", memory: "1Gi" }
+            requests: { cpu: "150m", memory: "384Mi" }
+            limits:   { cpu: "500m", memory: "768Mi" }
 ---
 apiVersion: v1
 kind: Service
@@ -52,5 +65,4 @@ spec:
   selector: { app: qsr-eta-api }
   ports:
     - { name: api, port: 80, targetPort: 8000 }
-    - { name: ui,  port: 8501, targetPort: 8501 }
   type: LoadBalancer

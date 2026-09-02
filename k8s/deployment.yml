@@ -1,6 +1,14 @@
 # Production deployment (namespace: prod) — FREE-TIER SLIM VARIANT.
-# Single t3.small node: ONE Deployment, ONE replica, API-only (ROLE=api).
-# Canary disabled on free tier (needs >=2 pods). Uses ${ECR_REGISTRY} and ${IMAGE_TAG}.
+#
+# Sized for a single t3.small (2 GB) Free-Tier node: ONE Deployment, ONE replica,
+# API-only (ROLE=api, no Streamlit) to keep memory within the node's headroom
+# after EKS system pods.
+#
+# CANARY IS DISABLED ON FREE TIER: a replica-ratio canary needs >=2 pods across
+# stable+canary tracks, which won't fit on one t3.small node. The canary
+# manifest is preserved at k8s/deployment.yml.canary-bak and the rollout script
+# (k8s/canary_rollout.sh) stays in the repo. To restore canary on a paid tier:
+# use 2+ larger nodes, copy the .canary-bak back over this file, and deploy.
 ---
 apiVersion: v1
 kind: Namespace
@@ -14,34 +22,40 @@ metadata:
   namespace: prod
   labels: { app: qsr-eta-api }
 spec:
-  replicas: 1
+  replicas: 1                      # single pod — Free-Tier single node
   selector:
     matchLabels: { app: qsr-eta-api }
   template:
     metadata:
       labels: { app: qsr-eta-api }
     spec:
-      serviceAccountName: qsr-eta-api
+      serviceAccountName: qsr-eta-api        # IRSA -> S3 access, no keys in pod
       containers:
         - name: api
           image: ${ECR_REGISTRY}/qsr-eta-prediction:${IMAGE_TAG}
           ports: [{ containerPort: 8000 }]
           env:
-            - { name: ROLE, value: "api" }
+            - { name: ROLE, value: "api" }          # API only (no Streamlit) to save memory
+            - { name: ENABLE_SHAP, value: "0" }     # SHAP import ~250MB RSS; off on t3.small
             - { name: MODEL_VERSION, value: "${IMAGE_TAG}" }
             - { name: S3_BUCKET, valueFrom: { configMapKeyRef: { name: qsr-eta-config, key: s3_bucket } } }
             - { name: AWS_REGION, valueFrom: { configMapKeyRef: { name: qsr-eta-config, key: aws_region } } }
             - { name: MODEL_MAPE_GATE, valueFrom: { configMapKeyRef: { name: qsr-eta-config, key: mape_gate } } }
+          startupProbe:
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 10
+            failureThreshold: 18          # up to 180s for the cold S3 model load
           readinessProbe:
             httpGet: { path: /health, port: 8000 }
-            initialDelaySeconds: 15
             periodSeconds: 10
           livenessProbe:
-            httpGet: { path: /health, port: 8000 }
-            initialDelaySeconds: 30
-            periodSeconds: 15
+            # /live is a process check only. Pointing liveness at /health made a
+            # transient S3 blip restart a healthy pod.
+            httpGet: { path: /live, port: 8000 }
+            periodSeconds: 20
+            failureThreshold: 3
           resources:
-            requests: { cpu: "150m", memory: "384Mi" }
+            requests: { cpu: "150m", memory: "384Mi" }   # fits t3.small w/ system pods
             limits:   { cpu: "500m", memory: "768Mi" }
 ---
 apiVersion: v1

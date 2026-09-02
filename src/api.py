@@ -2,7 +2,10 @@
 FastAPI serving layer for the Zomato delivery-time model (Phase 2).
 
 Endpoints:
-  GET  /health      — liveness/readiness (K8s probes). Confirms artifacts load.
+  GET  /live        — process liveness ONLY. No S3, no model. Used by the k8s
+                      livenessProbe so a transient S3 blip cannot restart a
+                      healthy pod (it previously shared /health and did).
+  GET  /health      — readiness. Confirms artifacts actually load.
   GET  /model_info  — current model MAPE/MAE/R2 + training date + version tag.
   POST /predict     — batch prediction with the full business layer per record.
 
@@ -22,7 +25,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 MODEL_VERSION = os.environ.get("MODEL_VERSION", "unknown")
-app = FastAPI(title="Zomato Delivery-Time API", version=MODEL_VERSION)
+app = FastAPI(title="QSR Delivery-Time API", version=MODEL_VERSION)
 
 
 class DeliveryRecord(BaseModel):
@@ -50,6 +53,12 @@ class PredictRequest(BaseModel):
     records: list[DeliveryRecord] = Field(..., min_length=1)
 
 
+@app.get("/live")
+def live():
+    """Cheap process check. Never touches S3."""
+    return {"status": "alive", "model_version": MODEL_VERSION}
+
+
 @app.get("/health")
 def health():
     try:
@@ -74,5 +83,7 @@ def predict_endpoint(req: PredictRequest):
         results = P.predict_records(records)
         return {"model_version": MODEL_VERSION, "results": results}
     except Exception as e:  # noqa: BLE001
-        logger.exception("prediction failed")
+        # predict_records already degrades to the rule-based fallback for
+        # model-side failures, so anything reaching here is a bad REQUEST.
+        logger.exception("prediction request rejected")
         raise HTTPException(status_code=400, detail=str(e))

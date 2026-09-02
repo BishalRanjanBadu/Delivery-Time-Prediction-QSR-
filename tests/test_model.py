@@ -26,18 +26,22 @@ from preprocess import DeliveryPreprocessor, split_raw, TARGET  # noqa: E402
 import train as T  # noqa: E402
 import predict as P  # noqa: E402
 
+# Resolution order, most-preferred first. The committed fixture makes the suite
+# run OFFLINE on CI (no AWS creds, no RAW_KEY, no NoSuchKey surprises). A local
+# full extract, if present, takes precedence for a realistic local gate.
+FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_raw.csv")
 DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "zomato_raw.csv")
 
 
 @pytest.fixture(scope="module")
 def raw():
-    """Load raw data: prefer a local copy (fast, offline); otherwise fall back to
-    S3 via the same s3_io the app uses. CI runners have no local data/ folder."""
     if os.path.exists(DATA_PATH):
         return pd.read_csv(DATA_PATH)
+    if os.path.exists(FIXTURE_PATH):
+        return pd.read_csv(FIXTURE_PATH)
+    # last resort: S3. Requires S3_BUCKET + RAW_KEY + credentials.
     import s3_io  # noqa: E402
-    raw_key = os.environ.get("RAW_KEY", "raw/zomato_raw.csv")
-    return s3_io.read_csv_s3(raw_key)
+    return s3_io.read_csv_s3(os.environ["RAW_KEY"])
 
 
 @pytest.fixture(scope="module")
@@ -191,17 +195,70 @@ def test_api_end_to_end(raw):
         )
         import train as T2
         import predict as P2
-        T2.train(raw_df=raw, n_iter=2, persist=True)
+        out = T2.train(raw_df=raw, n_iter=2, persist=True)
+        # /health can only be "ok" if artifacts were actually written. If the
+        # gate failed there is nothing in S3 — assert that explicitly rather
+        # than letting it surface as an opaque KeyError on the response body.
+        assert out["metrics"]["promoted"], (
+            f"train() did not promote (gate_passed="
+            f"{out['metrics']['gate_passed']}, mape={out['metrics']['mape']:.4f}); "
+            "no artifacts in S3, so the API cannot serve."
+        )
         P2.reset_cache()
         from fastapi.testclient import TestClient
         import api
         client = TestClient(api.app)
         assert client.get("/health").json()["status"] == "ok"
         assert "mape" in client.get("/model_info").json()
-        recs = raw.drop(columns=[TARGET]).head(3).to_dict("records")
+        # NaN is not valid JSON. Real clients send null; pandas NaN must be
+        # converted or httpx emits a bare `NaN` token that FastAPI rejects with
+        # "Out of range float values are not JSON compliant".
+        recs = (
+            raw.drop(columns=[TARGET]).head(3)
+            .astype(object).where(pd.notna(raw.drop(columns=[TARGET]).head(3)), None)
+            .to_dict("records")
+        )
         r = client.post("/predict", json={"records": recs})
         assert r.status_code == 200
         results = r.json()["results"]
         assert len(results) == 3
         assert all(res["eta_band"] in {"Fast", "Average", "Slow"} for res in results)
         assert all(0 < res["predicted_time_min"] < 120 for res in results)
+        # served by the model, not the degraded fallback path
+        assert all(res["source"] == "model" for res in results)
+
+
+# ---------------- regression: bugs fixed 2026-09 ----------------
+def test_distance_km_derived_when_absent(raw):
+    """`_engineer` must derive distance_km from the coordinates. Previously
+    OUTLIER_COLS referenced a column nothing created -> KeyError at fit()."""
+    if "distance_km" in raw.columns:
+        raw = raw.drop(columns=["distance_km"])
+    train_df, test_df = split_raw(raw)
+    pre = DeliveryPreprocessor().fit(train_df)
+    assert "distance_km" in pre.feature_names_
+    out = pre.transform(test_df)
+    assert out["distance_km"].notna().all()
+
+
+def test_sentinel_categories_do_not_become_nan(raw):
+    """Literal "NaN"/whitespace sentinels in the categorical columns must be
+    imputed, not silently carried through the scaler into the model."""
+    train_df, test_df = split_raw(raw)
+    pre = DeliveryPreprocessor().fit(train_df)
+    poisoned = test_df.copy()
+    poisoned["Road_traffic_density"] = "NaN "
+    poisoned["Festival"] = "NaN"
+    poisoned["Weather_conditions"] = "conditions NaN"
+    out = pre.transform(poisoned)          # raises if any NaN survives
+    assert out[pre.feature_names_].isna().sum().sum() == 0
+
+
+def test_predict_records_falls_back_instead_of_raising(raw, monkeypatch):
+    """Model-path failure must degrade to the rule-based estimate, never 5xx."""
+    monkeypatch.setattr(P, "_load_artifacts", lambda: (_ for _ in ()).throw(RuntimeError("s3 down")))
+    recs = raw.drop(columns=[TARGET]).head(2).to_dict("records")
+    out = P.predict_records(recs)
+    assert len(out) == 2
+    assert all(r["source"] == "fallback" for r in out)
+    assert all(r["predicted_time_min"] > 0 for r in out)

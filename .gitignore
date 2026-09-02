@@ -1,4 +1,6 @@
 .env
+*.env
+!.env.example
 __pycache__/
 *.pyc
 *.pkl
@@ -9,11 +11,9 @@ mlruns/
 s3sim/
 data/*.csv
 !data/.gitkeep
+# the CI fixture MUST be committed — the test job runs offline
+!tests/fixtures/sample_raw.csv
+rendered-*.yml
+qsr-eta-s3-read.json
 .venv/
 venv/
-qsr-eta-s3-read.json
-rendered.yml
-.env
-qsr-eta-s3-read.json
-rendered.yml
-.env

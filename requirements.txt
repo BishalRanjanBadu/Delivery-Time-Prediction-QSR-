@@ -1,5 +1,8 @@
-# QSR-ETA Phase 2 — pins verified against PyPI; clean-venv install + 13 tests pass.
-# Python 3.11.
+# QSR-ETA Phase 2 — all pins verified to exist on PyPI and resolve together
+# (pip dry-run clean). Python 3.11.
+#
+# Runtime (serving image) + test deps. Test deps are included here because CI
+# installs from this file to run pytest; they add little to the image.
 
 # --- runtime ---
 pandas==2.2.3
@@ -11,11 +14,11 @@ scipy==1.13.1
 shap==0.46.0
 boto3==1.35.76
 joblib==1.4.2
-fastapi==0.115.14
+fastapi==0.115.6
 pydantic==2.10.4
-uvicorn[standard]==0.34.0
+uvicorn==0.34.0
 
-# --- test (tests/test_model.py needs: pytest, moto for mocked S3,
+# --- test (needed by tests/test_model.py: pytest, moto for mocked S3,
 #     httpx for fastapi TestClient) ---
 pytest==8.3.4
 moto[s3]==5.0.28
