@@ -607,6 +607,3 @@ ELBs billing simultaneously and memory contention on one node.
 
 **Bishal Ranjan Badu**
 Data Science · Machine Learning · MLOps
-
-Companion repository — Phase 1 exploratory analysis, feature engineering and model selection:
-[Delivery-Time-Prediction-QSR](https://github.com/BishalRanjanBadu/Delivery-Time-Prediction-QSR)
