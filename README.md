@@ -23,7 +23,7 @@ two things — the failure modes there are silent, not loud.
 | Phase | Scope | Status |
 |---|---|---|
 | **1 — Experimentation** | EDA, feature engineering, model selection | signed off ([companion repo](https://github.com/BishalRanjanBadu/Delivery-Time-Prediction-QSR)) |
-| **2 — Deployment** | `src/` package, 16 tests, container, EKS, CI/CD, three-point parity | **complete — signed off 2026-09-02** |
+| **2 — Deployment** | `src/` package, 16 tests, container, EKS, CI/CD, three-point parity | **complete — signed off** |
 | **3 — Operate & Monitor** | drift detection, label collection, automated retraining | not started — prerequisites listed below |
 
 Each phase is gated by a recorded sign-off listing what was reviewed, what was accepted, and
